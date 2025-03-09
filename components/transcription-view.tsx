@@ -8,13 +8,22 @@ interface TranscriptionEntry {
   timestamp: string;
 }
 
+const CHUNK_SIZE = 8000; // bytes per chunk (adjust as needed)
+const CHUNK_DELAY = 200; // milliseconds delay between chunks 
+
 const TranscriptionView: React.FC = () => {
   const [socket, setSocket] = useState<WebSocket | null>(null);
   const [transcriptions, setTranscriptions] = useState<TranscriptionEntry[]>([]);
   const [isRecording, setIsRecording] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
+  const [isFileStreaming, setIsFileStreaming] = useState(false);
+  
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  
+  // Declare the ref for immediate file streaming state updates at top-level
+  const isFileStreamingRef = useRef(false);
 
   // Setup WebSocket connection
   useEffect(() => {
@@ -27,8 +36,10 @@ const TranscriptionView: React.FC = () => {
     };
 
     ws.onmessage = (event) => {
+      console.log("Raw message received:", event.data);
       try {
-        const data = JSON.parse(event.data);
+        const data: TranscriptionEntry = JSON.parse(event.data);
+        console.log(data.text);
         setTranscriptions(prev => [...prev, data]);
       } catch (error) {
         console.error("❌ Error parsing WebSocket message:", error);
@@ -113,6 +124,68 @@ const TranscriptionView: React.FC = () => {
     setIsRecording(!isRecording);
   };
 
+  // File upload handling
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file || !socket || socket.readyState !== WebSocket.OPEN) return;
+
+    // Clear previous transcriptions
+    setTranscriptions([]);
+    
+    // Set file streaming state both in state and in ref
+    setIsFileStreaming(true);
+    isFileStreamingRef.current = true;
+
+    let offset = 0;
+    const fileSize = file.size;
+
+    try {
+      // Read the entire file as an ArrayBuffer
+      const fileArrayBuffer = await file.arrayBuffer();
+  
+      // Create an AudioContext with the target sample rate (16kHz for Vosk)
+      const audioContext = new AudioContext({ sampleRate: 16000 });
+  
+      // Decode the audio file; this converts compressed formats (like MP3) to raw PCM (Float32Array)
+      const decodedAudio = await audioContext.decodeAudioData(fileArrayBuffer);
+  
+      // Assume mono audio: use the first channel's data
+      const channelData = decodedAudio.getChannelData(0);
+      const totalSamples = channelData.length;
+  
+      // Process and send the PCM data in chunks
+      while (offset < totalSamples && isFileStreamingRef.current) {
+        console.log("Processing chunk at offset:", offset);
+        // Slice a chunk of the audio samples
+        const chunkSamples = channelData.slice(offset, offset + CHUNK_SIZE);
+  
+        // Convert the Float32 samples to Int16 PCM data
+        const pcmChunk = new Int16Array(chunkSamples.length);
+        for (let i = 0; i < chunkSamples.length; i++) {
+          // Clamp the sample between -1 and 1, then scale to int16 range
+          const sample = Math.max(-1, Math.min(1, chunkSamples[i]));
+          pcmChunk[i] = sample * 32767;
+        }
+  
+        // Send the PCM data chunk to the server via WebSocket
+        socket.send(pcmChunk.buffer);
+        console.log("Sent chunk:", pcmChunk.buffer);
+  
+        offset += CHUNK_SIZE;
+  
+        // Wait a little before sending the next chunk to simulate real-time streaming
+        await new Promise(resolve => setTimeout(resolve, CHUNK_DELAY));
+      }
+    } catch (error) {
+      console.error("Error processing the audio file:", error);
+    }
+  
+    // Mark the end of file streaming
+    setIsFileStreaming(false);
+    isFileStreamingRef.current = false;
+    console.log("📂 Finished streaming file in chunks.");
+  };
+
   return (
     <div className="max-w-2xl mx-auto p-4">
       <h1 className="text-2xl font-bold mb-4">🎤 Real-time Transcription</h1>
@@ -126,6 +199,17 @@ const TranscriptionView: React.FC = () => {
       >
         {isRecording ? 'Stop Recording' : 'Start Recording'}
       </button>
+
+      <label className="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded cursor-pointer">
+        Stream File
+        <input 
+          type="file" 
+          accept="audio/*" 
+          onChange={handleFileUpload} 
+          className="hidden"
+          ref={fileInputRef}
+        />
+      </label>
       
       {!isConnected && (
         <div className="mb-4 text-red-500">

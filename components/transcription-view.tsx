@@ -2,10 +2,12 @@ import React, { useState, useEffect, useRef } from 'react';
 
 interface TranscriptionEntry {
   speaker: string;
+  speaker_id: number;
   text: string;
   profanity_detected: boolean;
   sentiment: string;
   timestamp: string;
+  update?: boolean;
 }
 
 const CHUNK_SIZE = 8000; // bytes per chunk (adjust as needed)
@@ -17,6 +19,7 @@ const TranscriptionView: React.FC = () => {
   const [isRecording, setIsRecording] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
   const [isFileStreaming, setIsFileStreaming] = useState(false);
+  const [speakerColors, setSpeakerColors] = useState<Record<number, string>>({});
   
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -39,8 +42,30 @@ const TranscriptionView: React.FC = () => {
       console.log("Raw message received:", event.data);
       try {
         const data: TranscriptionEntry = JSON.parse(event.data);
-        console.log(data.text);
-        setTranscriptions(prev => [...prev, data]);
+        
+        // Check if this is an update to an existing transcription
+        if (data.update) {
+          setTranscriptions(prev => 
+            prev.map(item => {
+              // Match by text and timestamp to update the correct entry
+              if (item.text === data.text && item.timestamp === data.timestamp) {
+                return { ...item, speaker: data.speaker, speaker_id: data.speaker_id };
+              }
+              return item;
+            })
+          );
+        } else {
+          console.log("New transcription:", data.text);
+          // Assign a color to each speaker_id if it doesn't exist yet
+          if (data.speaker_id !== undefined && !speakerColors[data.speaker_id]) {
+            setSpeakerColors(prev => ({
+              ...prev,
+              [data.speaker_id]: getRandomColor()
+            }));
+          }
+          
+          setTranscriptions(prev => [...prev, data]);
+        }
       } catch (error) {
         console.error("❌ Error parsing WebSocket message:", error);
       }
@@ -62,6 +87,29 @@ const TranscriptionView: React.FC = () => {
     };
   }, []);
 
+  // Update speaker colors when new ones are added
+  useEffect(() => {
+    const missingColors = transcriptions
+      .filter(t => t.speaker_id && !speakerColors[t.speaker_id])
+      .map(t => t.speaker_id);
+    
+    if (missingColors.length > 0) {
+      const newColors: Record<number, string> = {};
+      missingColors.forEach(id => {
+        if (id) newColors[id] = getRandomColor();
+      });
+      
+      setSpeakerColors(prev => ({...prev, ...newColors}));
+    }
+  }, [transcriptions]);
+
+  // Generate random pastel colors for speakers
+  const getRandomColor = () => {
+    // Generate lighter/pastel colors for better text readability
+    const h = Math.floor(Math.random() * 360);
+    return `hsl(${h}, 70%, 80%)`;
+  };
+
   // Handle recording start/stop
   useEffect(() => {
     if (!socket || !isConnected) return;
@@ -82,7 +130,7 @@ const TranscriptionView: React.FC = () => {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
       
-      // Convert audio to correct format for Vosk (16kHz mono)
+      // Convert audio to correct format for processing (16kHz mono)
       const audioContext = new AudioContext({ sampleRate: 16000 });
       const sourceNode = audioContext.createMediaStreamSource(stream);
       const processorNode = audioContext.createScriptProcessor(4096, 1, 1);
@@ -121,6 +169,10 @@ const TranscriptionView: React.FC = () => {
   };
 
   const toggleRecording = () => {
+    // Reset transcriptions when starting a new recording
+    if (!isRecording) {
+      setTranscriptions([]);
+    }
     setIsRecording(!isRecording);
   };
 
@@ -137,7 +189,6 @@ const TranscriptionView: React.FC = () => {
     isFileStreamingRef.current = true;
 
     let offset = 0;
-    const fileSize = file.size;
 
     try {
       // Read the entire file as an ArrayBuffer
@@ -186,30 +237,45 @@ const TranscriptionView: React.FC = () => {
     console.log("📂 Finished streaming file in chunks.");
   };
 
+  // Clear transcriptions
+  const clearTranscriptions = () => {
+    setTranscriptions([]);
+    // We keep the speaker colors for consistency
+  };
+
   return (
     <div className="max-w-2xl mx-auto p-4">
-      <h1 className="text-2xl font-bold mb-4">🎤 Real-time Transcription</h1>
+      <h1 className="text-2xl font-bold mb-4">🎤 Real-time Transcription with Neural Diarization</h1>
       
-      <button 
-        onClick={toggleRecording}
-        className={`px-4 py-2 rounded mb-4 ${isRecording 
-          ? 'bg-red-500 hover:bg-red-600 text-white' 
-          : 'bg-green-500 hover:bg-green-600 text-white'}`}
-        disabled={!isConnected}
-      >
-        {isRecording ? 'Stop Recording' : 'Start Recording'}
-      </button>
+      <div className="flex space-x-2 mb-4">
+        <button 
+          onClick={toggleRecording}
+          className={`px-4 py-2 rounded ${isRecording 
+            ? 'bg-red-500 hover:bg-red-600 text-white' 
+            : 'bg-green-500 hover:bg-green-600 text-white'}`}
+          disabled={!isConnected}
+        >
+          {isRecording ? 'Stop Recording' : 'Start Recording'}
+        </button>
 
-      <label className="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded cursor-pointer">
-        Stream File
-        <input 
-          type="file" 
-          accept="audio/*" 
-          onChange={handleFileUpload} 
-          className="hidden"
-          ref={fileInputRef}
-        />
-      </label>
+        <label className="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded cursor-pointer">
+          Stream Audio File
+          <input 
+            type="file" 
+            accept="audio/*" 
+            onChange={handleFileUpload} 
+            className="hidden"
+            ref={fileInputRef}
+          />
+        </label>
+        
+        <button 
+          onClick={clearTranscriptions}
+          className="bg-gray-500 hover:bg-gray-600 text-white px-4 py-2 rounded"
+        >
+          Clear
+        </button>
+      </div>
       
       {!isConnected && (
         <div className="mb-4 text-red-500">
@@ -221,35 +287,61 @@ const TranscriptionView: React.FC = () => {
         {transcriptions.length === 0 ? (
           <div className="text-gray-500 italic">Transcription will appear here...</div>
         ) : (
-          transcriptions.map((entry, index) => (
-            <div key={index} className="mb-2 pb-2 border-b">
-              <div className="font-semibold">
-                {entry.speaker} 
-                <span className="text-xs text-gray-500 ml-2">
-                  {new Date(entry.timestamp).toLocaleTimeString()}
-                </span>
-              </div>
-              <div className="ml-4">
-                {entry.text}
-                <div className="text-xs mt-1">
-                  <span className={`px-2 py-1 rounded mr-2 ${
-                    entry.sentiment === "Positive" ? "bg-green-100 text-green-800" :
-                    entry.sentiment === "Negative" ? "bg-red-100 text-red-800" :
-                    entry.sentiment === "Anger" ? "bg-orange-100 text-orange-800" :
-                    entry.sentiment === "Sarcasm" ? "bg-purple-100 text-purple-800" :
-                    "bg-gray-100 text-gray-800"
-                  }`}>
-                    {entry.sentiment}
-                  </span>
-                  {entry.profanity_detected && (
-                    <span className="bg-yellow-100 text-yellow-800 px-2 py-1 rounded">
-                      ⚠️ Profanity
+          transcriptions.map((entry, index) => {
+            // Group consecutive entries from the same speaker
+            const isSameSpeakerAsPrevious = index > 0 && 
+              transcriptions[index-1].speaker_id === entry.speaker_id &&
+              entry.speaker_id !== 0; // Don't group temporary entries
+            
+            return (
+              <div key={`${entry.timestamp}-${entry.text}`} className={`${isSameSpeakerAsPrevious ? 'mt-1' : 'mt-4'}`}>
+                {(!isSameSpeakerAsPrevious || entry.speaker_id === 0) && (
+                  <div 
+                    className={`font-semibold rounded-t px-2 py-1 ${
+                      entry.speaker_id === 0 ? 'bg-gray-300 text-gray-700' : ''
+                    }`}
+                    style={{ 
+                      backgroundColor: entry.speaker_id !== 0 ? speakerColors[entry.speaker_id] || '#e5e7eb' : '',
+                      display: 'inline-block'
+                    }}
+                  >
+                    {entry.speaker} 
+                    <span className="text-xs text-gray-700 ml-2">
+                      {new Date(entry.timestamp).toLocaleTimeString()}
                     </span>
-                  )}
+                  </div>
+                )}
+                <div 
+                  className="ml-4 p-2 rounded" 
+                  style={{
+                    backgroundColor: isSameSpeakerAsPrevious && entry.speaker_id !== 0
+                      ? 'transparent' 
+                      : entry.speaker_id !== 0 && speakerColors[entry.speaker_id] 
+                        ? `${speakerColors[entry.speaker_id]}40` // Add transparency
+                        : 'rgba(229, 231, 235, 0.4)'
+                  }}
+                >
+                  {entry.text}
+                  <div className="text-xs mt-1">
+                    <span className={`px-2 py-1 rounded mr-2 ${
+                      entry.sentiment === "Positive" ? "bg-green-100 text-green-800" :
+                      entry.sentiment === "Negative" ? "bg-red-100 text-red-800" :
+                      entry.sentiment === "Anger" ? "bg-orange-100 text-orange-800" :
+                      entry.sentiment === "Sarcasm" ? "bg-purple-100 text-purple-800" :
+                      "bg-gray-100 text-gray-800"
+                    }`}>
+                      {entry.sentiment}
+                    </span>
+                    {entry.profanity_detected && (
+                      <span className="bg-yellow-100 text-yellow-800 px-2 py-1 rounded">
+                        ⚠️ Profanity
+                      </span>
+                    )}
+                  </div>
                 </div>
               </div>
-            </div>
-          ))
+            );
+          })
         )}
       </div>
     </div>
